@@ -20,7 +20,8 @@ async fn main() {
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST]);
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers(Any); // ✅ Required for JWT
 
     let app = routes::create_routes(db)
         .layer(ServiceBuilder::new().layer(cors));
