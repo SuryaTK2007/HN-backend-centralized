@@ -44,3 +44,52 @@ pub async fn get_notes(
 
     Ok(Json(notes))
 }
+
+pub async fn delete_note(
+    State(db): State<Db>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let query = "DELETE FROM notes WHERE id = ?";
+
+    let result = sqlx::query(query)
+        .bind(&id)
+        .execute(&db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Note not found".into()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn update_note(
+    State(db): State<Db>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(payload): Json<NewNote>,
+) -> Result<Json<Note>, (StatusCode, String)> {
+    let query = "UPDATE notes SET title = ?, content = ? WHERE id = ?";
+
+    let result = sqlx::query(query)
+        .bind(&payload.title)
+        .bind(&payload.content)
+        .bind(&id)
+        .execute(&db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Note not found".into()));
+    }
+
+    // Return the updated note
+    let updated_note = Note {
+        id,
+        title: payload.title,
+        content: payload.content,
+        created_at: chrono::Utc::now().to_rfc3339(), // Not fetched again, just regenerated
+    };
+
+    Ok(Json(updated_note))
+}
