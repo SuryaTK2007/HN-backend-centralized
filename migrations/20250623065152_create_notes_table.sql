@@ -5,3 +5,4 @@ CREATE TABLE notes (
     content TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+

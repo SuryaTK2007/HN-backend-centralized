@@ -1,9 +1,9 @@
 // src/handlers.rs
 
-use axum::{Json, extract::State};
-use axum::http::StatusCode;
+use axum::{Json, extract::State, http::StatusCode};
 use uuid::Uuid;
-
+use chrono::Utc;
+use crate::{models::{NewUser}, auth::hash_password};
 use crate::models::{Note, NewNote};
 use crate::db::Db;
 
@@ -92,4 +92,38 @@ pub async fn update_note(
     };
 
     Ok(Json(updated_note))
+}
+
+pub async fn register_user(
+    State(db): State<Db>,
+    Json(payload): Json<NewUser>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    // Hash the password
+    let hashed = hash_password(&payload.password)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Hashing failed".into()))?;
+
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    // Insert into DB
+    let result = sqlx::query!(
+        r#"
+        INSERT INTO users (id, username, password_hash, created_at)
+        VALUES (?, ?, ?, ?)
+        "#,
+        id,
+        payload.username,
+        hashed,
+        now,
+    )
+    .execute(&db)
+    .await;
+
+    match result {
+        Ok(_) => Ok((StatusCode::CREATED, "User registered".into())),
+        Err(e) if e.to_string().contains("UNIQUE constraint") => {
+            Err((StatusCode::CONFLICT, "Username already taken".into()))
+        }
+        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to register".into())),
+    }
 }
