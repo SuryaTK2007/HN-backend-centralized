@@ -27,7 +27,7 @@ pub struct Claims {
 
 pub fn generate_jwt(user_id: &str) -> String {
     let expiration = Utc::now()
-        .checked_add_signed(Duration::hours(24))
+        .checked_add_signed(Duration::minutes(15)) //jwt will expire in 15 minutes
         .unwrap()
         .timestamp() as usize;
 
