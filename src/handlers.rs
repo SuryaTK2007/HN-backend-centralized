@@ -3,93 +3,165 @@
 use axum::{Json, extract::State, http::StatusCode};
 use uuid::Uuid;
 use chrono::Utc;
+use axum::http::HeaderMap;
 use crate::{models::{NewUser}, auth::hash_password};
 use crate::models::{Note, NewNote};
 use crate::db::Db;
+use crate::auth::{verify_password, generate_jwt};
+use crate::models::LoginRequest;
+use crate::models::User;
+use crate::auth::verify_jwt;
+
 
 pub async fn create_note(
     State(db): State<Db>,
+    headers: HeaderMap,
     Json(payload): Json<NewNote>,
 ) -> Result<(StatusCode, Json<Note>), (StatusCode, String)> {
-    let note = Note {
-        id: Uuid::new_v4().to_string(),
-        title: payload.title,
-        content: payload.content,
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
+    let token = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing token".to_string()))?;
 
-    let query = "INSERT INTO notes (id, title, content, created_at) VALUES (?, ?, ?, ?)";
+    let claims = verify_jwt(token).ok_or((StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let user_id = claims.sub;
 
-    sqlx::query(query)
-        .bind(&note.id)
-        .bind(&note.title)
-        .bind(&note.content)
-        .bind(&note.created_at)
-        .execute(&db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let note_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    let note = sqlx::query_as::<_, Note>(
+        r#"
+        INSERT INTO notes (id, title, content, created_at, user_id)
+        VALUES (?, ?, ?, ?, ?)
+        RETURNING *
+        "#
+    )
+    .bind(&note_id)
+    .bind(&payload.title)
+    .bind(&payload.content)
+    .bind(&now)
+    .bind(&user_id)
+    .fetch_one(&db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((StatusCode::CREATED, Json(note)))
 }
 
 pub async fn get_notes(
     State(db): State<Db>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<Note>>, (StatusCode, String)> {
-    let query = "SELECT * FROM notes ORDER BY created_at DESC";
+    let token = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing token".to_string()))?;
 
-    let notes = sqlx::query_as::<_, Note>(query)
-        .fetch_all(&db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let claims = verify_jwt(token).ok_or((StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let user_id = claims.sub;
+
+    let notes = sqlx::query_as::<_, Note>(
+        r#"
+        SELECT * FROM notes WHERE user_id = ?
+        "#
+    )
+    .bind(&user_id)
+    .fetch_all(&db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(notes))
 }
 
+
 pub async fn delete_note(
     State(db): State<Db>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let query = "DELETE FROM notes WHERE id = ?";
+    // 🔐 Extract user ID from JWT
+    let token = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing token".to_string()))?;
 
-    let result = sqlx::query(query)
+    let claims = verify_jwt(token).ok_or((StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let user_id = claims.sub;
+
+    // 🔍 Fetch the note and check ownership
+    let note = sqlx::query_as::<_, Note>("SELECT * FROM notes WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let note = match note {
+        Some(n) => {
+            if n.user_id != user_id {
+                return Err((StatusCode::UNAUTHORIZED, "Not authorized".to_string()));
+            }
+            n
+        }
+        None => return Err((StatusCode::NOT_FOUND, "Note not found".to_string())),
+    };
+
+    // ✅ Delete the note
+    sqlx::query("DELETE FROM notes WHERE id = ?")
         .bind(&id)
         .execute(&db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if result.rows_affected() == 0 {
-        return Err((StatusCode::NOT_FOUND, "Note not found".into()));
-    }
 
     Ok(StatusCode::NO_CONTENT)
 }
 
+
 pub async fn update_note(
     State(db): State<Db>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(payload): Json<NewNote>,
 ) -> Result<Json<Note>, (StatusCode, String)> {
-    let query = "UPDATE notes SET title = ?, content = ? WHERE id = ?";
+    // 🔐 Extract user ID from JWT
+    let token = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing token".to_string()))?;
 
-    let result = sqlx::query(query)
-        .bind(&payload.title)
-        .bind(&payload.content)
+    let claims = verify_jwt(token).ok_or((StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let user_id = claims.sub;
+
+    // 🔍 Fetch the note and check ownership
+    let note = sqlx::query_as::<_, Note>("SELECT * FROM notes WHERE id = ?")
         .bind(&id)
-        .execute(&db)
+        .fetch_optional(&db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if result.rows_affected() == 0 {
-        return Err((StatusCode::NOT_FOUND, "Note not found".into()));
-    }
-
-    // Return the updated note
-    let updated_note = Note {
-        id,
-        title: payload.title,
-        content: payload.content,
-        created_at: chrono::Utc::now().to_rfc3339(), // Not fetched again, just regenerated
+    let note = match note {
+        Some(n) => {
+            if n.user_id != user_id {
+                return Err((StatusCode::UNAUTHORIZED, "Not authorized".to_string()));
+            }
+            n
+        }
+        None => return Err((StatusCode::NOT_FOUND, "Note not found".to_string())),
     };
+
+    // ✅ Update the note
+    let updated_note = sqlx::query_as::<_, Note>(
+        "UPDATE notes SET title = ?, content = ? WHERE id = ? RETURNING *",
+    )
+    .bind(&payload.title)
+    .bind(&payload.content)
+    .bind(&id)
+    .fetch_one(&db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(updated_note))
 }
@@ -126,4 +198,32 @@ pub async fn register_user(
         }
         Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to register".into())),
     }
+}
+
+pub async fn login_user(
+    State(db): State<Db>,
+    Json(payload): Json<LoginRequest>,
+) -> Result<Json<String>, (StatusCode, String)> {
+    let user = sqlx::query_as::<_, User>(
+    "SELECT * FROM users WHERE username = ?"
+    )
+    .bind(&payload.username)
+    .fetch_optional(&db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let user = match user {
+        Some(u) => u,
+        None => return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".into())),
+    };
+
+    let valid = verify_password(&payload.password, &user.password_hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if !valid {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".into()));
+    }
+
+    let token = generate_jwt(&user.id);
+    Ok(Json(token))
 }
